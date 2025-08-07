@@ -1,78 +1,101 @@
 import os
-import glob
-from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+import chromadb
+from dotenv import load_dotenv
+from langchain_community.document_loaders import UnstructuredPDFLoader
 from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.embeddings import FastEmbedEmbeddings
+# Importing the utility to clean up metadata
+from langchain_community.vectorstores.utils import filter_complex_metadata
+import logging
 
-PDF_DIR = "./bajajFinserv"
-PERSIST_DIR = "./chroma_db" # Chroma DB Storage location
-EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-CHUNK_SIZE = 500
-CHUNK_OVERLAP = 50
+# --- Setup and Initialization ---
 
-def ingest_data():
-    """
-    Ingests data from PDF files, splits them into chunks, creates embeddings,
-    and stores them in a ChromaDB vector store.
-    """
-    print("Starting data ingestion process...")
+# Configure logging for better visibility into the process
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-    # Step 1: Load documents from the PDF directory
-    print(f"Loading documents from '{PDF_DIR}'...")
-    documents = []
-    # Use glob to find all PDF files in the specified directory
-    pdf_files = glob.glob(os.path.join(PDF_DIR, "*.pdf"))
-    
-    if not pdf_files:
-        print(f"No PDF files found in '{PDF_DIR}'. Please add some PDFs and try again.")
-        return
+# Load environment variables (if any)
+load_dotenv()
 
-    for file_path in pdf_files:
-        try:
-            loader = PyPDFLoader(file_path)
-            documents.extend(loader.load())
-            print(f"  - Loaded {os.path.basename(file_path)}")
-        except Exception as e:
-            print(f"  - Failed to load {os.path.basename(file_path)}: {e}")
-            
-    if not documents:
-        print("No documents could be loaded. Exiting.")
-        return
+# --- Configuration ---
+# Directory containing your PDF files
+PDF_DIR = "bajajFinserv2"
+# Directory to persist the ChromaDB database
+PERSIST_DIR = "chroma_db"
+# Name of the collection to store the embeddings
+COLLECTION_NAME = "policy_documents_v3"
+# Embedding model name
+EMBEDDING_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 
-    # Step 2: Split documents into smaller, manageable chunks
-    print(f"Splitting documents into chunks of size {CHUNK_SIZE} with overlap {CHUNK_OVERLAP}...")
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
-        separators=["\n\n", "\n", " ", ""]  # A good default list of separators
-    )
-    chunks = text_splitter.split_documents(documents)
-    print(f"  - Created {len(chunks)} chunks.")
-
-    # Step 3: Create embeddings using HuggingFace's model
-    print(f"Initializing embedding model: {EMBEDDING_MODEL_NAME}...")
-    embedding_model = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
-
-    # Step 4: Store chunks and embeddings in ChromaDB
-    print(f"Creating and persisting ChromaDB vector store at '{PERSIST_DIR}'...")
-    try:
-        db = Chroma.from_documents(
-            documents=chunks,
-            embedding=embedding_model,
-            persist_directory=PERSIST_DIR
-        )
-        db.persist()
-        print("  - ChromaDB created successfully.")
-        print("Data ingestion complete!")
-    except Exception as e:
-        print(f"An error occurred while creating or persisting ChromaDB: {e}")
-
+# --- Main Ingestion Process ---
 if __name__ == "__main__":
-    # Ensure the downloaded_pdfs directory exists
-    if not os.path.exists(PDF_DIR):
-        print(f"The directory '{PDF_DIR}' does not exist. Creating it now.")
-        os.makedirs(PDF_DIR)
-        print("Please place your PDF files in this directory and re-run the script.")
+    logging.info("Starting data ingestion process.")
+
+    # Step 1: Initialize ChromaDB client
+    try:
+        chroma_client = chromadb.PersistentClient(path=PERSIST_DIR)
+        logging.info("ChromaDB client initialized.")
+    except Exception as e:
+        logging.error(f"Failed to initialize ChromaDB client: {e}")
+        exit()
+
+    # Step 2: Check for existing collection and delete if it exists
+    try:
+        existing_collections = [c.name for c in chroma_client.list_collections()]
+        if COLLECTION_NAME in existing_collections:
+            logging.warning(f"Collection '{COLLECTION_NAME}' already exists. Deleting and recreating.")
+            chroma_client.delete_collection(COLLECTION_NAME)
+    except Exception as e:
+        logging.error(f"Error checking/deleting old collection: {e}")
+
+    # Step 3: Load documents using UnstructuredPDFLoader
+    documents = []
+    if os.path.exists(PDF_DIR) and os.listdir(PDF_DIR):
+        for filename in os.listdir(PDF_DIR):
+            if filename.endswith(".pdf"):
+                file_path = os.path.join(PDF_DIR, filename)
+                logging.info(f"Loading document: {file_path}")
+                try:
+                    loader = UnstructuredPDFLoader(file_path, mode="elements")
+                    documents.extend(loader.load())
+                except Exception as e:
+                    logging.error(f"Failed to load PDF '{filename}': {e}")
     else:
-        ingest_data()
+        logging.error(f"The directory '{PDF_DIR}' does not exist or is empty. Please check the path and contents.")
+        exit()
+
+    logging.info(f"Loaded a total of {len(documents)} document elements.")
+    
+    # Step 3.5: Filter complex metadata to resolve the error
+    if documents:
+        logging.info("Filtering complex metadata from documents...")
+        documents = filter_complex_metadata(documents)
+        logging.info("Metadata filtering complete.")
+
+    # Step 4: Initialize the embedding model
+    logging.info("Initializing FastEmbed embeddings model...")
+    try:
+        embeddings = FastEmbedEmbeddings(model_name=EMBEDDING_MODEL_NAME)
+    except Exception as e:
+        logging.error(f"Failed to initialize FastEmbed embeddings: {e}")
+        exit()
+    logging.info("Embeddings model initialized.")
+
+    # Step 5: Create the vector store and persist it
+    if documents:
+        logging.info(f"Creating and persisting new collection '{COLLECTION_NAME}'...")
+        try:
+            db = Chroma.from_documents(
+                documents,
+                embeddings,
+                client=chroma_client,
+                collection_name=COLLECTION_NAME,
+                persist_directory=PERSIST_DIR
+            )
+            logging.info(f"Successfully created and persisted collection '{COLLECTION_NAME}'.")
+            logging.info(f"Collection count: {db._collection.count()}")
+        except Exception as e:
+            logging.error(f"Failed to create and persist vector store: {e}")
+    else:
+        logging.warning("No documents were loaded, skipping vector store creation.")
+    
+    logging.info("Data ingestion process complete.")
