@@ -5,7 +5,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
-PDF_DIR = "./downloaded_pdfs"
+PDF_DIR = "./bajajFinserv"
 PERSIST_DIR = "./chroma_db" # Chroma DB Storage location
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 CHUNK_SIZE = 500
